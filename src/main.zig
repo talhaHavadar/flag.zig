@@ -2,17 +2,21 @@ const std = @import("std");
 const flag = @import("flag");
 
 pub fn main() !void {
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try flag.bufferedPrint();
-}
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+    var flags = flag.init(.{ .debug = true });
+    defer flags.deinit(allocator);
 
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+    _ = try flags.flag(allocator, "c", .{ .int = 1 }, "count");
+    try flags.parse(.{});
+
+    const usage = try flags.usage(allocator);
+    defer allocator.free(usage);
+    _ = try std.fs.File.stdout().write(usage);
+
+    std.debug.print("Or print directly with managed allocation\n", .{});
+    try flags.printUsage(.{});
 }
 
 test "fuzz example" {

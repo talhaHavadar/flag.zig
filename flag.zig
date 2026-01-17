@@ -11,26 +11,113 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const ArgIterator = std.process.ArgIterator;
+const logger = std.log.scoped(.__flag_zig);
+const assert = std.debug.assert;
 
-pub fn bufferedPrint() !void {
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
+const Flags = @This();
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
+const FlagValue = union(enum) {
+    int: i64,
+    float: f64,
+    string: []const u8,
+    boolean: bool,
 
-    try stdout.flush(); // Don't forget to flush!
+    pub fn deinit(self: FlagValue, allocator: Allocator) void {
+        switch (self) {
+            .string => |v| allocator.free(v),
+            else => {}, // stack-allocated, nothing to free
+        }
+    }
+};
+
+const Flag = struct {
+    name: []const u8,
+    value: FlagValue,
+    default: FlagValue,
+    help: []const u8,
+};
+
+debug: bool = false,
+flags: std.ArrayList(Flag) = .empty,
+
+pub fn init(o: struct {
+    /// debug flag for contributors of flag.zig
+    debug: bool = false,
+}) Flags {
+    return .{ .flags = .empty, .debug = o.debug };
 }
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
+pub fn deinit(self: *Flags, allocator: Allocator) void {
+    for (self.flags.items) |f| {
+        f.value.deinit(allocator);
+        f.default.deinit(allocator);
+    }
+    self.flags.deinit(allocator);
 }
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+pub fn flag(
+    self: *Flags,
+    allocator: Allocator,
+    name: []const u8,
+    default: FlagValue,
+    help: []const u8,
+) !void {
+    try self.flags.append(allocator, .{
+        .name = name,
+        .value = default,
+        .default = default,
+        .help = help,
+    });
+}
+
+/// Returns the usage text based on given flag configuration so far.
+///
+/// Caller of this function should free the text returned.
+pub fn usage(self: Flags, allocator: Allocator) ![]const u8 {
+    _ = self;
+    return try std.fmt.allocPrint(allocator,
+        \\Usage:
+        \\
+    , .{});
+}
+
+/// Prints the usage text to given file by default it uses `stdout`
+pub fn printUsage(self: Flags, o: struct {
+    file: std.fs.File = std.fs.File.stdout(),
+}) !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+    const usage_text = try self.usage(allocator);
+    defer allocator.free(usage_text);
+    _ = try o.file.write(usage_text);
+}
+
+/// Parses the args either fetched from std.process.args() or given `argIterator`
+pub fn parse(self: *Flags, o: struct {
+    /// flag uses std.process.args by default providing custom iterator allows
+    /// users to parse subsections of commandline
+    argIterator: ?ArgIterator = null,
+}) !void {
+    var aIterator = std.process.args();
+    var process: ?[]const u8 = null;
+    if (o.argIterator) |iter| {
+        aIterator = iter;
+    } else {
+        process = aIterator.next();
+    }
+    self.log(
+        "parse:: process:{s}",
+        .{std.fs.path.basename(process orelse "null")},
+    );
+}
+pub fn log(
+    self: Flags,
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (self.debug) logger.debug(format, args);
 }
