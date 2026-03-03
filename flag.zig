@@ -65,6 +65,7 @@ const Flag = struct {
 
 debug: bool = false,
 flags: std.ArrayList(Flag) = .empty,
+positional_args: std.ArrayList([]const u8) = .empty,
 command_name: []const u8 = "",
 help_flag_added: bool = false,
 
@@ -84,6 +85,9 @@ pub fn deinit(self: *Flags, allocator: Allocator) void {
         }
     }
     self.flags.deinit(allocator);
+
+    // Note: positional_args items are not freed as they reuse std.process.args()'s allocation
+    self.positional_args.deinit(allocator);
 }
 
 pub fn flag(
@@ -264,20 +268,17 @@ fn parseArg(
     arg: []const u8,
     iterator: *ArgIterator,
 ) (FlagsError || Allocator.Error)!void {
-    // Must start with '-'
+    // Collect positional arguments (not starting with '-')
+    // Note: we reuse std.process.args()'s allocation, no need to dupe
     if (arg.len == 0 or arg[0] != '-') {
-        return FlagsError.UnknownFlag;
+        try self.positional_args.append(allocator, arg);
+        return;
     }
 
     // Determine if short (-c) or long (--name) flag
     var flag_start: usize = 1;
     if (arg.len > 1 and arg[1] == '-') {
         flag_start = 2; // Long flag: --name
-    }
-
-    // Handle edge case: just "-" or "--"
-    if (flag_start >= arg.len) {
-        return FlagsError.UnknownFlag;
     }
 
     const remainder = arg[flag_start..];
@@ -377,9 +378,9 @@ fn validateRequired(self: *Flags) FlagsError!void {
 fn log(
     self: Flags,
     comptime format: []const u8,
-    args: anytype,
+    log_args: anytype,
 ) void {
-    if (self.debug) logger.debug(format, args);
+    if (self.debug) logger.debug(format, log_args);
 }
 
 /// Get a flag's value by name using comptime type
@@ -407,6 +408,11 @@ pub fn wasSet(self: *const Flags, name: []const u8) bool {
         }
     }
     return false;
+}
+
+/// Returns positional arguments (non-flag arguments)
+pub fn args(self: *const Flags) []const []const u8 {
+    return self.positional_args.items;
 }
 
 // ============================================================================
@@ -518,4 +524,66 @@ test "usage text generation" {
     try std.testing.expect(std.mem.indexOf(u8, usage_text, "[-c]") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage_text, "(--name)") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage_text, "(required)") != null);
+}
+
+test "args returns empty slice initially" {
+    const allocator = std.testing.allocator;
+    var flags = Flags.init(.{});
+    defer flags.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), flags.args().len);
+}
+
+test "positional arguments collection" {
+    const allocator = std.testing.allocator;
+    var flags = Flags.init(.{});
+    defer flags.deinit(allocator);
+
+    // parseArg doesn't use iterator for positional args, so we can pass undefined
+    var dummy_iter: ArgIterator = undefined;
+
+    try flags.parseArg(allocator, "file1.txt", &dummy_iter);
+    try flags.parseArg(allocator, "file2.txt", &dummy_iter);
+
+    const positional = flags.args();
+    try std.testing.expectEqual(@as(usize, 2), positional.len);
+    try std.testing.expectEqualStrings("file1.txt", positional[0]);
+    try std.testing.expectEqualStrings("file2.txt", positional[1]);
+}
+
+test "positional arguments mixed with flags" {
+    const allocator = std.testing.allocator;
+    var flags = Flags.init(.{});
+    defer flags.deinit(allocator);
+
+    try flags.flag(allocator, "verbose", .{ .boolean = false }, "Verbose mode");
+
+    var dummy_iter: ArgIterator = undefined;
+
+    // Mix of flags and positional args
+    try flags.parseArg(allocator, "input.txt", &dummy_iter);
+    try flags.parseArg(allocator, "-verbose", &dummy_iter);
+    try flags.parseArg(allocator, "output.txt", &dummy_iter);
+
+    const positional = flags.args();
+    try std.testing.expectEqual(@as(usize, 2), positional.len);
+    try std.testing.expectEqualStrings("input.txt", positional[0]);
+    try std.testing.expectEqualStrings("output.txt", positional[1]);
+
+    // Verify flag was also set
+    try std.testing.expectEqual(true, flags.get(bool, "verbose").?);
+}
+
+test "empty string is treated as positional argument" {
+    const allocator = std.testing.allocator;
+    var flags = Flags.init(.{});
+    defer flags.deinit(allocator);
+
+    var dummy_iter: ArgIterator = undefined;
+
+    try flags.parseArg(allocator, "", &dummy_iter);
+
+    const positional = flags.args();
+    try std.testing.expectEqual(@as(usize, 1), positional.len);
+    try std.testing.expectEqualStrings("", positional[0]);
 }
